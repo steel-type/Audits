@@ -319,8 +319,9 @@ if ($credCount) {
 }
 $regEvents = @($findings['TaskSchedulerEvents'] | Where-Object { $_.Id -eq 106 })
 if ($regEvents.Count) { $flags.Add("$($regEvents.Count) scheduled tasks were REGISTERED inside the examined window. See TaskSchedulerEvents for exact timestamps.") }
-$svcCount = Measure-Real $findings['ServiceInstallEvents'] 'TimeCreated'
-if ($svcCount) { $flags.Add("$svcCount new services installed inside the window.") }
+$svcNoise = 'Microsoft|Windows Defender|WdAiNis|MpDefender|Parallels|prl_|VMware|VirtualBox|SystemRoot|system32|Edge|Printer Extensions'
+$svcCount = @($findings['ServiceInstallEvents'] | Where-Object { $_.TimeCreated -and $_.Detail -notmatch $svcNoise }).Count
+if ($svcCount) { $flags.Add("$svcCount non-vendor service(s) installed inside the window.") }
 $ranTasks = @($findings['ScheduledTasks'] | Where-Object { $_.NextRun })
 if ($ranTasks) { $flags.Add("$($ranTasks.Count) non-Microsoft scheduled tasks have a next run time. These only fire while the machine is awake.") }
 
@@ -368,8 +369,6 @@ $tools = [ordered]@{
     'LM Studio (local models)'   = 'lm ?studio'
     'OpenAI tooling'             = 'openai|chatgpt'
     'Zapier or Make'             = 'zapier|make\.com|integromat'
-    'Node.js runtime'            = 'node\.exe|nodejs|npm ls'
-    'Python (real, not a stub)'  = 'python\.exe(?!.*WindowsApps)|Python 3'
 }
 foreach ($t in $tools.GetEnumerator()) {
     $hit = [regex]::IsMatch($everything, $t.Value, 'IgnoreCase')
@@ -377,6 +376,16 @@ foreach ($t in $tools.GetEnumerator()) {
     foreach ($k in $hay.Keys) { if ([regex]::IsMatch($hay[$k], $t.Value, 'IgnoreCase')) { $where += $k } }
     Add-Check 'AI tooling' $t.Key $hit ($where -join ', ')
 }
+
+# Runtimes are judged from the structured binary list, not text matching, because a
+# Microsoft Store placeholder puts the word "python" on disk without installing Python.
+$realBins = @($findings['Binaries'] | Where-Object { $_.Name -and -not $_.StoreStub })
+$py = @($realBins | Where-Object { $_.Name -match '^python' })
+Add-Check 'AI tooling' 'Python (real install)' ($py.Count -gt 0) (($py.Source) -join ', ')
+$nodeB = @($realBins | Where-Object { $_.Name -eq 'node' -or $_.Name -eq 'npm' -or $_.Name -eq 'npx' })
+Add-Check 'AI tooling' 'Node.js runtime (real install)' ($nodeB.Count -gt 0) (($nodeB.Name) -join ', ')
+$stubs = @($findings['Binaries'] | Where-Object { $_.StoreStub })
+Add-Check 'AI tooling' 'Store placeholders (look installed, are not)' ($stubs.Count -gt 0) (($stubs.Name) -join ', ')
 
 # Automation: the Windows equivalent of cron, and anything set to launch itself.
 $aiPattern = 'claude|openclaw|anthropic|openai|\bant\.exe|langchain|crewai|n8n|agent|\.py\b|node\.exe|curl|Invoke-WebRequest'
@@ -395,8 +404,10 @@ Add-Check 'Automation' 'Startup items referencing AI tooling' ($aiStartup.Count 
 $aiSvc = @($findings['NonWindowsServices'] | Where-Object { $_.PathName -and $_.PathName -match $aiPattern })
 Add-Check 'Automation' 'Services referencing AI tooling' ($aiSvc.Count -gt 0) (($aiSvc.Name) -join ', ')
 
-$svcNew = Measure-Real $findings['ServiceInstallEvents'] 'TimeCreated'
-Add-Check 'Automation' 'Services installed inside the window' ($svcNew -gt 0) "$svcNew event(s)"
+$vendorNoise = 'Microsoft|Windows Defender|WdAiNis|MpDefender|Parallels|prl_|VMware|VirtualBox|SystemRoot|system32|Edge|Printer Extensions'
+$svcAll = @($findings['ServiceInstallEvents'] | Where-Object { $_.TimeCreated })
+$svcOdd = @($svcAll | Where-Object { $_.Detail -notmatch $vendorNoise })
+Add-Check 'Automation' 'Non-vendor services installed inside the window' ($svcOdd.Count -gt 0) "$($svcOdd.Count) of $($svcAll.Count) total (rest are OS or hypervisor)"
 
 $localListeners = @($findings['ListeningPorts'] | Where-Object {
     $_.LocalAddress -eq '127.0.0.1' -and $_.Process -and
